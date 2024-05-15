@@ -64,37 +64,59 @@ function runAction(
         controller.abort();
     }, base._airtable._requestTimeout);
 
-    fetch(url, options)
-        .then(resp => {
-            clearTimeout(timeout);
-            if (resp.status === 429 && !base._airtable._noRetryIfRateLimited) {
-                const backoffDelayMs = exponentialBackoffWithJitter(numAttempts);
-                setTimeout(() => {
-                    runAction(base, method, path, queryParams, bodyData, callback, numAttempts + 1);
-                }, backoffDelayMs);
-            } else {
-                resp.json()
-                    .then(body => {
-                        const error = base._checkStatusForError(resp.status, body);
-                        // Ensure Response interface matches interface from
-                        // `request` Response object
-                        const r = {} as ActionResponse;
-                        Object.keys(resp).forEach(property => {
-                            r[property] = resp[property];
+    function fetchWithRetries(url, options, numAttempts = 0, maxRetries = 3) {
+        const timeout = setTimeout(() => {
+            callback(new Error("Request timed out"));
+        }, options.timeout || 5000);
+    
+        fetch(url, options)
+            .then(resp => {
+                clearTimeout(timeout);
+                if (resp.status === 429 && !base._airtable._noRetryIfRateLimited && numAttempts < maxRetries) {
+                    const backoffDelayMs = exponentialBackoffWithJitter(numAttempts);
+                    setTimeout(() => {
+                        fetchWithRetries(url, options, numAttempts + 1, maxRetries);
+                    }, backoffDelayMs);
+                } else {
+                    resp.json()
+                        .then(body => {
+                            const error = base._checkStatusForError(resp.status, body);
+                            // Ensure Response interface matches interface from
+                            // `request` Response object
+                            const r = {} as ActionResponse;
+                            Object.keys(resp).forEach(property => {
+                                r[property] = resp[property];
+                            });
+                            r.body = body;
+                            r.statusCode = resp.status;
+                            callback(error, r, body);
+                        })
+                        .catch(() => {
+                            callback(base._checkStatusForError(resp.status));
                         });
-                        r.body = body;
-                        r.statusCode = resp.status;
-                        callback(error, r, body);
-                    })
-                    .catch(function() {
-                        callback(base._checkStatusForError(resp.status));
-                    });
-            }
-        })
-        .catch(error => {
-            clearTimeout(timeout);
-            callback(error);
-        });
+                }
+            })
+            .catch(error => {
+                clearTimeout(timeout);
+                if (numAttempts < maxRetries) {
+                    const backoffDelayMs = exponentialBackoffWithJitter(numAttempts);
+                    setTimeout(() => {
+                        fetchWithRetries(url, options, numAttempts + 1, maxRetries);
+                    }, backoffDelayMs);
+                } else {
+                    callback(error);
+                }
+            });
+    }
+    
+    function exponentialBackoffWithJitter(attempt) {
+        const maxDelay = 1000; // maximum delay of 1 second
+        const delay = Math.min(maxDelay, Math.pow(2, attempt) * 100);
+        const jitter = Math.random() * delay;
+        return delay + jitter;
+    }
+
+    fetchWithRetries(url, options)
 }
 
 /* eslint-disable no-redeclare, @typescript-eslint/no-namespace */
